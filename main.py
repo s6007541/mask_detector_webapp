@@ -1,58 +1,44 @@
-import cv2
 import streamlit as st
+from PIL import Image
 import torch
 import numpy as np
-from PIL import Image
-from models.common import *
 
-st.title("Webcam Live Feed")
-run = st.checkbox('Run')
-FRAME_WINDOW = st.image([])
-camera = cv2.VideoCapture(0)
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
 
 
-def writebox(result):
-    show, save, render, crop, labels = True,False,False,False, True
-    crops = []
-    for i, (im, pred) in enumerate(zip(result.imgs, result.pred)):
-        s = f'image {i + 1}/{len(result.pred)}: {im.shape[0]}x{im.shape[1]} '  # string
-        if pred.shape[0]:
-            for c in pred[:, -1].unique():
-                n = (pred[:, -1] == c).sum()  # detections per class
-                s += f"{n} {result.names[int(c)]}{'s' * (n > 1)}, "  # add to string
-            if show or save or render or crop:
-                annotator = Annotator(im, example=str(result.names))
-                for *box, conf, cls in reversed(pred):  # xyxy, confidence, class
-                    label = f'{result.names[int(cls)]} {conf:.2f}'
-                    if crop:
-                        file = save_dir / 'crops' / result.names[int(cls)] / result.files[i] if save else None
-                        crops.append({
-                            'box': box,
-                            'conf': conf,
-                            'cls': cls,
-                            'label': label,
-                            'im': save_one_box(box, im, file=file, save=save)})
-                    else:  # all others
-                        annotator.box_label(box, label if labels else '', color=colors(cls))
-                im = annotator.im
-        else:
-            s += '(no detections)'
-
-        im = Image.fromarray(im.astype(np.uint8)) if isinstance(im, np.ndarray) else im  # from np
-        return im
-
-path = 'best.pt'
-
-model = torch.hub.load('ultralytics/yolov5', 'custom', path=path)
-
-while run:
+device = 'cpu'
+if not hasattr(st, 'classifier'):
+    # st.model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+    st.model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt')
     
-    _, frame = camera.read()
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    result = model(frame)
+
+
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+
+class VideoProcessor:
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
         
-    FRAME_WINDOW.image(writebox(result))
-    
-else:
-    st.write('Stopped')
+        # vision processing
+        flipped = img[:, ::-1, :]
+
+        # model processing
+        im_pil = Image.fromarray(flipped)
+        results = st.model(im_pil)
+        bbox_img = np.array(results.render()[0])
+
+        return av.VideoFrame.from_ndarray(bbox_img, format="bgr24")
+
+
+webrtc_ctx = webrtc_streamer(
+    key="WYH",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,
+    video_processor_factory=VideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=False,
+)
